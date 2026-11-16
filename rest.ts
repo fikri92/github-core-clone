@@ -20,10 +20,16 @@ const str = (v: unknown, d = ''): string => (typeof v === 'string' ? v : d);
 const bool = (v: unknown, d: boolean): boolean => (typeof v === 'boolean' ? v : d);
 const iso = (epoch: number): string => new Date(epoch * 1000).toISOString().replace('.000Z', 'Z');
 
+const USER_CACHE = new Map<string, Record<string, unknown>>();
+
 function userJson(login: string): Record<string, unknown> {
+  const hit = USER_CACHE.get(login);
+  if (hit !== undefined) return hit;
   const user = userByName(login);
-  return { login: user.login, id: user.id, node_id: `U_${user.id}`, type: 'User', name: user.name, email: user.email,
+  const built: Record<string, unknown> = { login: user.login, id: user.id, node_id: `U_${user.id}`, type: 'User', name: user.name, email: user.email,
     avatar_url: `http://entry/avatars/${user.login}.png`, html_url: `http://entry/${user.login}` };
+  USER_CACHE.set(login, built);
+  return built;
 }
 const labelJson = (label: Label): Record<string, unknown> => ({ id: label.id, node_id: `LA_${label.id}`, name: label.name, color: label.color, default: false, description: label.description });
 

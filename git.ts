@@ -16,6 +16,7 @@ function pkt(text: string | Buffer): Buffer {
   const head = Buffer.from((data.length + 4).toString(16).padStart(4, '0'), 'ascii');
   return Buffer.concat([head, data]);
 }
+const fetchCache = new Map<string, Buffer>();
 const FLUSH = Buffer.from('0000', 'ascii');
 const DELIM = Buffer.from('0001', 'ascii');
 
@@ -474,6 +475,7 @@ function wantCommits(wants: string[]): string[] {
 }
 
 function handleFetch(repo: Repo, args: string[]): Buffer {
+  const FETCH_CACHE = fetchCache;
   const { wants, haves, shallows, depth, filter } = parseFetchArgs(args);
   const out: Buffer[] = [];
   const valid = wants.filter((want) => /^[0-9a-f]{40}$/.test(want) && objects.has(want));
@@ -505,6 +507,13 @@ function handleFetch(repo: Repo, args: string[]): Buffer {
       for (const sha of [...send]) if (held.has(sha)) send.delete(sha);
     }
   }
+  const cacheKey = haves.length === 0 && filter === null && shallows.length === 0 && valid.length === 1 && (depth === null || depth === 1)
+    ? `${valid[0]}|${depth === null ? 'full' : 'd1'}`
+    : null;
+  if (cacheKey !== null) {
+    const hit = FETCH_CACHE.get(cacheKey);
+    if (hit !== undefined) return hit;
+  }
   const shallowLines: string[] = [];
   if (depth !== null) {
     for (const sha of boundary) shallowLines.push(`shallow ${sha}\n`);
@@ -523,7 +532,9 @@ function handleFetch(repo: Repo, args: string[]): Buffer {
   out.push(pkt('packfile\n'));
   for (const chunk of band1(buildPack(send))) out.push(chunk);
   out.push(FLUSH);
-  return Buffer.concat(out);
+  const response = Buffer.concat(out);
+  if (cacheKey !== null && FETCH_CACHE.size < 4096) FETCH_CACHE.set(cacheKey, response);
+  return response;
 }
 
 // ------------------------------------------------------------------ receive-pack
