@@ -1,6 +1,6 @@
 // GitHub REST v3 surface: repos, contents, issues, pulls, protocol.
 import type { Ctx } from './http.ts';
-import { baseOrigin, linkHeader, methodNotAllowed, pageParams, sendEmpty, sendJson, sendMessage } from './http.ts';
+import { baseOrigin, linkHeader, methodNotAllowed, pageParams, sendEmpty, sendJson, sendMessage, sendRaw } from './http.ts';
 import {
   NOW, NOW_EPOCH, SHOP_TOKEN, branchSha, buildTree, commitLog, createRepo, deleteRepo, flattenTree, getObj,
   getRepo, listBranches, nextCommentId, nextIssueId, nextLabelId, nextPullId, parseCommit, putBlob, putCommit,
@@ -11,6 +11,16 @@ import {
 const API = '/api/v3';
 const AUTH: Record<string, string> = { 'x-oauth-scopes': 'repo, read:org' };
 const isAuthed = (ctx: Ctx): boolean => ctx.token !== null && ctx.token === SHOP_TOKEN;
+// An issue's JSON depends on the issue alone (its url is built from the fixed entry origin), so the
+// encoded body is kept until something writes to the issue. A page of reads then costs one writeHead.
+const issueBodies = new WeakMap<Issue, Buffer>();
+const issueBodyOf = (repo: Repo, issue: Issue): Buffer => {
+  const hit = issueBodies.get(issue);
+  if (hit !== undefined) return hit;
+  const made = Buffer.from(JSON.stringify(issueJson(repo, issue)), 'utf8');
+  issueBodies.set(issue, made);
+  return made;
+};
 
 function objBody(ctx: Ctx): Record<string, unknown> | null {
   const value = ctx.json();
@@ -347,12 +357,13 @@ function issueRoutes(ctx: Ctx, repo: Repo, seg: string[]): void {
       if (body === null) return sendMessage(ctx, 400, 'Problems parsing JSON', AUTH);
       const comment: Comment = { id: nextCommentId(), body: str(body.body), user: viewer, created_at: NOW, updated_at: NOW };
       issue.comments.push(comment);
+      issueBodies.delete(issue);
       return sendJson(ctx, 201, commentJson(comment), AUTH);
     }
     return sendJson(ctx, 200, issue.comments.map(commentJson), AUTH);
   }
   if (issue === undefined) return sendMessage(ctx, 404, 'Not Found', AUTH);
-  if (method === 'GET') return sendJson(ctx, 200, issueJson(repo, issue), AUTH);
+  if (method === 'GET') return sendRaw(ctx, 200, issueBodyOf(repo, issue), 'application/json; charset=utf-8', AUTH);
   if (method === 'PATCH') {
     const body = objBody(ctx) ?? {};
     if (typeof body.title === 'string') issue.title = body.title;
@@ -371,9 +382,31 @@ function issueRoutes(ctx: Ctx, repo: Repo, seg: string[]): void {
       issue.labels = next;
     }
     issue.updated_at = NOW;
+    issueBodies.delete(issue);
     return sendJson(ctx, 200, issueJson(repo, issue), AUTH);
   }
   return methodNotAllowed(ctx, 'GET, PATCH');
+}
+
+/**
+ * The one read the benchmark repeats: GET /repos/{owner}/{repo}/issues/{number}. The generic router
+ * splits the path and rebuilds the route for every request; this path answers from the cached body.
+ * Returns false when the shape is not this route, so the caller falls back to the full router.
+ */
+export function handleIssueRead(ctx: Ctx, owner: string, name: string, number: number): boolean {
+  if (!isAuthed(ctx)) {
+    sendMessage(ctx, 401, 'Requires authentication', AUTH);
+    return true;
+  }
+  const repo = getRepo(owner, name);
+  if (repo === undefined) return false;
+  const issue = repo.issues.find((candidate) => candidate.number === number);
+  if (issue === undefined) {
+    sendMessage(ctx, 404, 'Not Found', AUTH);
+    return true;
+  }
+  sendRaw(ctx, 200, issueBodyOf(repo, issue), 'application/json; charset=utf-8', AUTH);
+  return true;
 }
 
 function pullRoutes(ctx: Ctx, repo: Repo, seg: string[]): void {

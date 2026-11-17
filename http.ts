@@ -17,11 +17,11 @@ export interface HeaderMap {
 
 const requestIds = new WeakMap<ServerResponse, string>();
 
+let idSeq = 0;
+
 export function makeRequestId(): string {
-  const alphabet = '0123456789ABCDEF';
-  let out = '';
-  for (let i = 0; i < 16; i += 1) out += alphabet[Math.floor(Math.random() * 16)];
-  return `${out}:${Date.now().toString(36).toUpperCase()}`;
+  idSeq = (idSeq + 1) % 0x7fffffff;
+  return `${idSeq.toString(16).toUpperCase().padStart(8, '0')}${Date.now().toString(36).toUpperCase()}`;
 }
 
 export function requestId(ctx: Ctx): string {
@@ -44,8 +44,12 @@ function baseHeaders(ctx: Ctx, headers: HeaderMap | undefined, contentType: stri
 }
 
 export function send(ctx: Ctx, status: number, body: string | Buffer, contentType: string, headers?: HeaderMap): void {
+  sendRaw(ctx, status, typeof body === 'string' ? Buffer.from(body, 'utf8') : body, contentType, headers);
+}
+
+/** A body already made into bytes: no second encode, and a caller may cache the buffer. */
+export function sendRaw(ctx: Ctx, status: number, buffer: Buffer, contentType: string, headers?: HeaderMap): void {
   const out = baseHeaders(ctx, headers, contentType);
-  const buffer = typeof body === 'string' ? Buffer.from(body, 'utf8') : body;
   out['content-length'] = String(buffer.length);
   ctx.res.writeHead(status, out);
   ctx.res.end(buffer);

@@ -483,6 +483,15 @@ function handleFetch(repo: Repo, args: string[]): Buffer {
     out.push(FLUSH);
     return Buffer.concat(out);
   }
+  // A depth-1 clone of one wanted commit is the same bytes every time, so the answer is looked up
+  // before any history walk: the walk is the expensive half of a shallow clone.
+  const cacheKey = haves.length === 0 && filter === null && shallows.length === 0 && valid.length === 1 && (depth === null || depth === 1)
+    ? `${valid[0]}|${depth === null ? 'full' : 'd1'}`
+    : null;
+  if (cacheKey !== null) {
+    const hit = FETCH_CACHE.get(cacheKey);
+    if (hit !== undefined) return hit;
+  }
   const { commits, boundary } = commitSet(wantCommits(valid), depth);
   let send: Set<string>;
   if (depth !== null) {
@@ -506,13 +515,6 @@ function handleFetch(repo: Repo, args: string[]): Buffer {
       const held = objectClosure(haves);
       for (const sha of [...send]) if (held.has(sha)) send.delete(sha);
     }
-  }
-  const cacheKey = haves.length === 0 && filter === null && shallows.length === 0 && valid.length === 1 && (depth === null || depth === 1)
-    ? `${valid[0]}|${depth === null ? 'full' : 'd1'}`
-    : null;
-  if (cacheKey !== null) {
-    const hit = FETCH_CACHE.get(cacheKey);
-    if (hit !== undefined) return hit;
   }
   const shallowLines: string[] = [];
   if (depth !== null) {
