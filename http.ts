@@ -1,75 +1,103 @@
-// HTTP helpers shared by every module: one request context, JSON answers, error shapes.
 import type { IncomingMessage, ServerResponse } from 'node:http';
 
 export interface Ctx {
-  readonly req: IncomingMessage;
-  readonly res: ServerResponse;
-  readonly method: string;
-  readonly path: string;
-  readonly url: URL;
-  readonly query: URLSearchParams;
-  readonly body: Buffer;
-  readonly token: string | null;
-  /** The request also carried a session/query token the entry accepted. */
-  readonly json: () => unknown;
+  req: IncomingMessage;
+  res: ServerResponse;
+  method: string;
+  path: string;
+  query: URLSearchParams;
+  token: string | null;
+  body: Buffer;
+  json(): unknown;
 }
 
-export const JSON_TYPE = 'application/json; charset=utf-8';
-let requestSeq = 0;
-
-export function nextRequestId(): string {
-  requestSeq += 1;
-  return `mf-${requestSeq.toString(16).padStart(8, '0')}`;
+export interface HeaderMap {
+  [name: string]: string | undefined;
 }
 
-export function send(ctx: Ctx, status: number, body: Buffer, type: string, headers: Record<string, string | undefined> = {}): void {
-  const res = ctx.res;
-  if (res.headersSent) return;
-  const out: Record<string, string | number> = {
-    'content-type': type,
-    'content-length': body.length,
-    'x-github-request-id': (headers['x-github-request-id'] as string) ?? nextRequestId(),
-  };
-  for (const [k, v] of Object.entries(headers)) if (v !== undefined) out[k] = v;
-  res.writeHead(status, out);
-  res.end(body);
+const requestIds = new WeakMap<ServerResponse, string>();
+
+export function makeRequestId(): string {
+  const alphabet = '0123456789ABCDEF';
+  let out = '';
+  for (let i = 0; i < 16; i += 1) out += alphabet[Math.floor(Math.random() * 16)];
+  return `${out}:${Date.now().toString(36).toUpperCase()}`;
 }
 
-export function sendJson(ctx: Ctx, status: number, value: unknown, headers: Record<string, string | undefined> = {}): void {
-  const text = JSON.stringify(value);
-  send(ctx, status, Buffer.from(text, 'utf8'), JSON_TYPE, headers);
+export function requestId(ctx: Ctx): string {
+  const hit = requestIds.get(ctx.res);
+  if (hit !== undefined) return hit;
+  const made = makeRequestId();
+  requestIds.set(ctx.res, made);
+  return made;
 }
 
-export function sendMessage(ctx: Ctx, status: number, message: string, headers: Record<string, string | undefined> = {}): void {
-  sendJson(ctx, status, { message, documentation_url: 'https://docs.github.com/rest' }, headers);
+function baseHeaders(ctx: Ctx, headers: HeaderMap | undefined, contentType: string): Record<string, string> {
+  const merged: Record<string, string> = { 'content-type': contentType, 'x-github-request-id': requestId(ctx) };
+  if (headers === undefined) return merged;
+  for (const name of Object.keys(headers)) {
+    const value = headers[name];
+    if (value === undefined) continue;
+    merged[name.toLowerCase()] = value;
+  }
+  return merged;
 }
 
-export function sendEmpty(ctx: Ctx, status: number, headers: Record<string, string | undefined> = {}): void {
-  send(ctx, status, Buffer.alloc(0), JSON_TYPE, headers);
+export function send(ctx: Ctx, status: number, body: string | Buffer, contentType: string, headers?: HeaderMap): void {
+  const out = baseHeaders(ctx, headers, contentType);
+  const buffer = typeof body === 'string' ? Buffer.from(body, 'utf8') : body;
+  out['content-length'] = String(buffer.length);
+  ctx.res.writeHead(status, out);
+  ctx.res.end(buffer);
 }
 
-export function sendHtml(ctx: Ctx, status: number, html: string): void {
-  send(ctx, status, Buffer.from(html, 'utf8'), 'text/html; charset=utf-8');
+export function sendJson(ctx: Ctx, status: number, value: unknown, headers?: HeaderMap): void {
+  send(ctx, status, JSON.stringify(value), 'application/json; charset=utf-8', headers);
+}
+
+export function sendMessage(ctx: Ctx, status: number, message: string, headers?: HeaderMap): void {
+  sendJson(ctx, status, { message }, headers);
+}
+
+export function sendEmpty(ctx: Ctx, status: number, headers?: HeaderMap): void {
+  const out = baseHeaders(ctx, headers, 'application/json; charset=utf-8');
+  out['content-length'] = '0';
+  ctx.res.writeHead(status, out);
+  ctx.res.end();
 }
 
 export function methodNotAllowed(ctx: Ctx, allow: string): void {
-  sendMessage(ctx, 405, 'Method Not Allowed', { allow });
+  sendMessage(ctx, 405, `Method not allowed: ${ctx.method} on ${ctx.path}`, { allow });
 }
 
-/** A pagination Link header for `next` (absolute URL) when there is one. */
-export function linkHeader(next: string | null): Record<string, string | undefined> {
-  return next === null ? {} : { link: `<${next}>; rel="next"` };
-}
-
-export function pageParams(query: URLSearchParams): { perPage: number; page: number } {
-  const perRaw = Number(query.get('per_page') ?? '30');
-  const pageRaw = Number(query.get('page') ?? '1');
-  const perPage = Number.isFinite(perRaw) && perRaw > 0 ? Math.min(100, Math.trunc(perRaw)) : 30;
-  const page = Number.isFinite(pageRaw) && pageRaw > 0 ? Math.trunc(pageRaw) : 1;
-  return { perPage, page };
+export function linkHeader(next: string | null): HeaderMap {
+  return { link: next === null ? undefined : `<${next}>; rel="next"` };
 }
 
 export function baseOrigin(ctx: Ctx): string {
   const host = (ctx.req.headers.host as string | undefined) ?? '127.0.0.1';
   return `http://${host}`;
+}
+
+export function pageParams(query: URLSearchParams): { perPage: number; page: number } {
+  const rawPer = Number(query.get('per_page') ?? '');
+  const rawPage = Number(query.get('page') ?? '');
+  let perPage = Number.isFinite(rawPer) && rawPer > 0 ? Math.floor(rawPer) : 30;
+  if (perPage > 100) perPage = 100;
+  let page = Number.isFinite(rawPage) && rawPage > 0 ? Math.floor(rawPage) : 1;
+  if (page < 1) page = 1;
+  return { perPage, page };
+}
+
+export function bearerOf(header: string | string[] | undefined): string | null {
+  const raw = Array.isArray(header) ? header[0] : header;
+  if (typeof raw !== 'string') return null;
+  const match = /^\s*Bearer\s+(\S+)\s*$/i.exec(raw);
+  if (match === null) return null;
+  return match[1] ?? null;
+}
+
+export function parseJsonBody(body: string): unknown {
+  if (body.trim() === '') return null;
+  return JSON.parse(body);
 }

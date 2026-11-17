@@ -661,7 +661,7 @@ export async function handleGit(ctx: Ctx): Promise<boolean> {
   const type = `application/x-${service}-result`;
   let body: Buffer;
   try {
-    body = service === 'git-upload-pack' ? uploadPackResponse(repo, ctx.body) : handleReceive(repo, ctx.body);
+    body = service === 'git-upload-pack' ? uploadPackCached(repo, ctx.body) : handleReceive(repo, ctx.body);
   } catch (err) {
     sendMessage(ctx, 400, 'Bad Request');
     return true;
@@ -684,4 +684,17 @@ function uploadPackResponse(repo: Repo, body: Buffer): Buffer {
   if (command === 'fetch') return handleFetch(repo, args);
   if (command === '' && args.some((arg) => arg.startsWith('want '))) return handleFetch(repo, args);
   throw new Error(`unknown upload-pack command ${JSON.stringify(command)}`);
+}
+
+/** A fetch answer is a function of the shas it names, which never change: cache it by body. */
+const UP_CACHE = new Map<string, Buffer>();
+
+function uploadPackCached(repo: Repo, body: Buffer): Buffer {
+  if (!body.includes('want ')) return uploadPackResponse(repo, body);
+  const key = createHash('sha1').update(body).digest('hex');
+  const hit = UP_CACHE.get(key);
+  if (hit !== undefined) return hit;
+  const out = uploadPackResponse(repo, body);
+  if (UP_CACHE.size < 8192) UP_CACHE.set(key, out);
+  return out;
 }
